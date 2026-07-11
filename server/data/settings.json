@@ -1,0 +1,15 @@
+{
+  "thresholds": {
+    "weak1dRoas": 1.5,
+    "strong7dRoas": 4,
+    "breakevenRoas": 2.2,
+    "scaleStep": 0.25,
+    "overReportPct": 0.6,
+    "stockOutDays": 7,
+    "cpaSpikePct": 0.3
+  },
+  "platformCredibility": {
+    "meta": 0.62,
+    "google": 0.84
+  }
+}

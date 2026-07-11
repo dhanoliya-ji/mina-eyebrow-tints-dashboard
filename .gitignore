@@ -1,0 +1,20 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+
+# ---- Secrets & runtime data ----
+.env
+data/*.json
+data/*.db
+
+# ---- Old Node.js version (kept, but not needed for the Python app) ----
+node_modules/
+server/node_modules/
+dist/
+
+# ---- misc ----
+*.log
+.DS_Store

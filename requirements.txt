@@ -1,0 +1,11 @@
+# Python dependencies for the Mina Command Center backend.
+# Install everything with:   pip install -r requirements.txt
+#
+# We deliberately keep this tiny so the project is easy to understand:
+#   Flask          -> the web server (serves the dashboard + the /api endpoints)
+#   requests       -> makes HTTP calls to the marketing APIs (and the demo feed)
+#   python-dotenv  -> loads your API keys from the .env file into the program
+
+Flask==3.0.3
+requests==2.32.3
+python-dotenv==1.0.1
