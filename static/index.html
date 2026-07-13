@@ -47,7 +47,7 @@
   // =========================================================================
   const state = {
     theme: 'light',      // light / dark
-    range: '7 days',     // date range chip (visual)
+    range: '7 days',     // date range chip
     channel: 'All',      // All / Meta / Google filter
     openCampaign: null,  // which campaign row is expanded
     data: null,          // the latest payload from Python
@@ -55,12 +55,21 @@
     syncing: false,
   };
 
+  // Helper to extract numeric window days from state.range (e.g. '7 days' -> 7, 'Today' -> 1)
+  function getWindowDays() {
+    if (state.range === 'Today') return 1;
+    if (state.range === '30 days') return 30;
+    const parsed = parseInt(state.range);
+    return isNaN(parsed) ? 7 : parsed;
+  }
+
   // =========================================================================
   //  Talking to the Python backend.
   // =========================================================================
   async function loadData() {
+    const days = getWindowDays();
     try {
-      const res = await fetch('/api/dashboard');
+      const res = await fetch(`/api/dashboard?window_days=${days}`);
       const d = await res.json();
       if (!d.ready) { setTimeout(loadData, 1000); return; } // sync not done yet
       state.data = d;
@@ -76,7 +85,15 @@
 
   async function refresh() {
     state.syncing = true; render();
-    try { await fetch('/api/refresh', { method: 'POST' }); await loadData(); }
+    const days = getWindowDays();
+    try { 
+      await fetch('/api/refresh', { 
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ window_days: days })
+      }); 
+      await loadData(); 
+    }
     finally { state.syncing = false; render(); }
   }
 
@@ -157,8 +174,14 @@
     // ---- Toolbar (range + channel filters) ----
     const seg = (opts, cur, group) => `<div class="seg">${opts.map(o =>
       `<button class="${cur === o ? 'active' : ''}" data-${group}="${o}">${o}</button>`).join('')}</div>`;
+      
+    // Determine active ranges: dynamically display custom range if selected
+    const baseRanges = ['Today', '7 days', '30 days'];
+    const rangeOptions = baseRanges.includes(state.range) ? baseRanges : [...baseRanges, state.range];
+
     const toolbar = `<div class="toolbar">
-        <span class="toolbar-label">Range</span>${seg(['Today', '7 days', '30 days'], state.range, 'range')}
+        <span class="toolbar-label">Range</span>${seg(rangeOptions, state.range, 'range')}
+        <button class="btn btn-sm" id="customRangeBtn" style="margin-left:4px;padding:3px 8px;font-size:11px;border-radius:4px">Custom...</button>
         <span class="toolbar-label" style="margin-left:8px">Channel</span>${seg(['All', 'Meta', 'Google'], state.channel, 'channel')}
       </div>`;
 
@@ -227,7 +250,7 @@
     const funnel = `
       <div class="card">
         <div class="card-head"><div class="card-title">Shopify funnel</div>
-          <span class="card-sub">last 7 days</span></div>
+          <span class="card-sub">last ${state.range}</span></div>
         <div class="funnel">${d.funnel.map(s => `
           <div class="funnel-step">
             <div class="funnel-meta">
@@ -323,7 +346,7 @@
     document.getElementById('refreshBtn').onclick = refresh;
 
     document.querySelectorAll('[data-range]').forEach(el =>
-      el.onclick = () => { state.range = el.dataset.range; render(); });
+      el.onclick = () => { state.range = el.dataset.range; loadData(); });
     document.querySelectorAll('[data-channel]').forEach(el =>
       el.onclick = () => { state.channel = el.dataset.channel; render(); });
     document.querySelectorAll('[data-campaign]').forEach(el =>
@@ -331,6 +354,23 @@
         state.openCampaign = state.openCampaign === el.dataset.campaign ? null : el.dataset.campaign;
         render();
       });
+      
+    // Wire custom range button
+    const customBtn = document.getElementById('customRangeBtn');
+    if (customBtn) {
+      customBtn.onclick = () => {
+        const val = prompt("Enter custom window in days (e.g. 14, 45, 90):", "14");
+        if (val) {
+          const parsed = parseInt(val);
+          if (!isNaN(parsed) && parsed > 0) {
+            state.range = parsed + " days";
+            loadData();
+          } else {
+            alert("Please enter a valid positive number of days.");
+          }
+        }
+      };
+    }
   }
 
   // Kick everything off.

@@ -183,12 +183,14 @@ def _r(n: float) -> int:
     return int(round(n))
 
 
-def get_demo_sources() -> dict:
+def get_demo_sources(window_days: int = 7) -> dict:
     """
-    Build live-modulated versions of all four sources from one weather signal.
+    Build live-modulated versions of all four sources from one weather signal,
+    scaling all volume metrics by the duration of the time window.
     Returns {"meta":..., "google":..., "shopify":..., "shiprocket":...}.
     """
     sig = _get_signal()
+    scale = window_days / 7.0  # mock data is defined for a 7-day window
 
     # --- Meta: move spend and value by DIFFERENT amounts so ROAS actually changes.
     meta_campaigns = []
@@ -197,17 +199,21 @@ def get_demo_sources() -> dict:
         fv = _factor(c["id"] + "v", sig, 0.7, 1.35)   # value factor (wider swing)
         meta_campaigns.append({
             **c,
-            "spend": _r(c["spend"] * fs),
-            "impressions": _r(c["impressions"] * fs),
-            "clicks": _r(c["clicks"] * fs),
-            "purchases": _r(c["purchases"] * fv),
-            "value_1d_click": _r(c["value_1d_click"] * fv),
-            "value_7d_click": _r(c["value_7d_click"] * fv),
+            "spend": _r(c["spend"] * scale * fs),
+            "impressions": _r(c["impressions"] * scale * fs),
+            "clicks": _r(c["clicks"] * scale * fs),
+            "purchases": _r(c["purchases"] * scale * fv),
+            "value_1d_click": _r(c["value_1d_click"] * scale * fv),
+            "value_7d_click": _r(c["value_7d_click"] * scale * fv),
+            "purchases_1d_click": _r(c["purchases_1d_click"] * scale * fv),
+            "purchases_7d_click": _r(c["purchases_7d_click"] * scale * fv),
+            "adds_to_cart": _r(c["adds_to_cart"] * scale * fs),
+            "checkouts_initiated": _r(c["checkouts_initiated"] * scale * fs),
             "adsets": [{
                 **a,
-                "spend": _r(a["spend"] * _factor(a["id"] + "s", sig)),
-                "value_1d_click": _r(a["value_1d_click"] * _factor(a["id"] + "v", sig, 0.7, 1.35)),
-                "value_7d_click": _r(a["value_7d_click"] * _factor(a["id"] + "v", sig, 0.7, 1.35)),
+                "spend": _r(a["spend"] * scale * _factor(a["id"] + "s", sig)),
+                "value_1d_click": _r(a["value_1d_click"] * scale * _factor(a["id"] + "v", sig, 0.7, 1.35)),
+                "value_7d_click": _r(a["value_7d_click"] * scale * _factor(a["id"] + "v", sig, 0.7, 1.35)),
             } for a in c.get("adsets", [])],
         })
     meta = {"campaigns": meta_campaigns}
@@ -219,36 +225,43 @@ def get_demo_sources() -> dict:
         fv = _factor(c["id"] + "v", sig, 0.7, 1.35)
         google_campaigns.append({
             **c,
-            "spend": _r(c["spend"] * fs),
-            "clicks": _r(c["clicks"] * fs),
-            "conversions": _r(c["conversions"] * fv),
-            "conv_value_1d": _r(c["conv_value_1d"] * fv),
-            "conv_value_7d": _r(c["conv_value_7d"] * fv),
+            "spend": _r(c["spend"] * scale * fs),
+            "clicks": _r(c["clicks"] * scale * fs),
+            "conversions": _r(c["conversions"] * scale * fv),
+            "conv_value_1d": _r(c["conv_value_1d"] * scale * fv),
+            "conv_value_7d": _r(c["conv_value_7d"] * scale * fv),
             "adsets": [{
                 **a,
-                "spend": _r(a["spend"] * _factor(a["id"] + "s", sig)),
-                "conv_value_1d": _r(a["conv_value_1d"] * _factor(a["id"] + "v", sig, 0.7, 1.35)),
-                "conv_value_7d": _r(a["conv_value_7d"] * _factor(a["id"] + "v", sig, 0.7, 1.35)),
+                "spend": _r(a["spend"] * scale * _factor(a["id"] + "s", sig)),
+                "conv_value_1d": _r(a["conv_value_1d"] * scale * _factor(a["id"] + "v", sig, 0.7, 1.35)),
+                "conv_value_7d": _r(a["conv_value_7d"] * scale * _factor(a["id"] + "v", sig, 0.7, 1.35)),
             } for a in c.get("adsets", [])],
         })
     google = {"campaigns": google_campaigns}
 
-    # --- Shopify: one overall demand factor + live per-SKU inventory (so the
-    #     stock-out warning can genuinely appear/disappear between refreshes).
+    # --- Shopify: overall demand factor + velocity scaling.
     demand = _factor("shopify-demand", sig, 0.8, 1.25)
     shopify = {
         **MOCK_SHOPIFY,
-        "sessions": _r(MOCK_SHOPIFY["sessions"] * demand),
-        "addToCart": _r(MOCK_SHOPIFY["addToCart"] * demand),
-        "checkouts": _r(MOCK_SHOPIFY["checkouts"] * demand),
-        "orders": _r(MOCK_SHOPIFY["orders"] * demand),
-        "grossRevenue": _r(MOCK_SHOPIFY["grossRevenue"] * demand),
-        "refunds": _r(MOCK_SHOPIFY["refunds"] * _factor("refunds", sig)),
-        "newCustomers": _r(MOCK_SHOPIFY["newCustomers"] * demand),
+        "sessions": _r(MOCK_SHOPIFY["sessions"] * scale * demand),
+        "addToCart": _r(MOCK_SHOPIFY["addToCart"] * scale * demand),
+        "checkouts": _r(MOCK_SHOPIFY["checkouts"] * scale * demand),
+        "orders": _r(MOCK_SHOPIFY["orders"] * scale * demand),
+        "grossRevenue": _r(MOCK_SHOPIFY["grossRevenue"] * scale * demand),
+        "refunds": _r(MOCK_SHOPIFY["refunds"] * scale * _factor("refunds", sig)),
+        "newCustomers": _r(MOCK_SHOPIFY["newCustomers"] * scale * demand),
+        "prev": {
+            "trueRevenue": _r(MOCK_SHOPIFY["prev"]["trueRevenue"] * scale),
+            "adSpend": _r(MOCK_SHOPIFY["prev"]["adSpend"] * scale),
+            "mer": MOCK_SHOPIFY["prev"]["mer"],
+            "cac": MOCK_SHOPIFY["prev"]["cac"],
+            "orders": _r(MOCK_SHOPIFY["prev"]["orders"] * scale),
+            "aov": MOCK_SHOPIFY["prev"]["aov"]
+        },
         "skus": [{
             **s,
-            "units": _r(s["units"] * _factor(s["sku"] + "u", sig)),
-            "revenue": _r(s["revenue"] * _factor(s["sku"] + "r", sig)),
+            "units": _r(s["units"] * scale * _factor(s["sku"] + "u", sig)),
+            "revenue": _r(s["revenue"] * scale * _factor(s["sku"] + "r", sig)),
             "inventory": _r(s["inventory"] * _factor(s["sku"] + "inv", sig, 0.5, 1.4)),
             "dailyVelocity": max(1, _r(s["dailyVelocity"] * demand)),
         } for s in MOCK_SHOPIFY["skus"]],
@@ -258,12 +271,12 @@ def get_demo_sources() -> dict:
     shiprocket = {
         **MOCK_SHIPROCKET,
         "totalOrders": shopify["orders"],
-        "delivered": _r(MOCK_SHIPROCKET["delivered"] * demand),
-        "in_transit": _r(MOCK_SHIPROCKET["in_transit"] * demand),
-        "cancelled": _r(MOCK_SHIPROCKET["cancelled"] * _factor("cancel", sig)),
-        "rto": _r(MOCK_SHIPROCKET["rto"] * _factor("rto", sig)),
-        "cancelledRevenue": _r(MOCK_SHIPROCKET["cancelledRevenue"] * _factor("cancelRev", sig, 0.6, 1.5)),
-        "rtoRevenue": _r(MOCK_SHIPROCKET["rtoRevenue"] * _factor("rtoRev", sig, 0.6, 1.5)),
+        "delivered": _r(MOCK_SHIPROCKET["delivered"] * scale * demand),
+        "in_transit": _r(MOCK_SHIPROCKET["in_transit"] * scale * demand),
+        "cancelled": _r(MOCK_SHIPROCKET["cancelled"] * scale * _factor("cancel", sig)),
+        "rto": _r(MOCK_SHIPROCKET["rto"] * scale * _factor("rto", sig)),
+        "cancelledRevenue": _r(MOCK_SHIPROCKET["cancelledRevenue"] * scale * _factor("cancelRev", sig, 0.6, 1.5)),
+        "rtoRevenue": _r(MOCK_SHIPROCKET["rtoRevenue"] * scale * _factor("rtoRev", sig, 0.6, 1.5)),
     }
 
     return {

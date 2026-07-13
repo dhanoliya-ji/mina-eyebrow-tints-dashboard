@@ -14,6 +14,7 @@ Same three-step pattern: real key -> demo -> mock.
 
 import time
 import requests
+from datetime import datetime, timedelta, timezone
 
 import config
 from mock_data import MOCK_SHIPROCKET
@@ -23,14 +24,15 @@ from connectors.demo_live import get_demo_sources
 _token_cache = {"token": None, "expires": 0}
 
 
-def fetch_shiprocket() -> dict:
+def fetch_shiprocket(window_days: int = 7) -> dict:
+    """Fetch shipments from Shiprocket for the specified day window."""
     c = config.SHIPROCKET
 
     # ---- No real key yet -> demo feed or mock ---------------------------
     if not c["live"]:
         if config.DEMO_LIVE:
             try:
-                demo = get_demo_sources()
+                demo = get_demo_sources(window_days=window_days)
                 return {"data": demo["shiprocket"], "live": True,
                         "note": f"DEMO live via {demo['signal_source']} — replace with real Shiprocket API"}
             except Exception as e:
@@ -40,10 +42,16 @@ def fetch_shiprocket() -> dict:
     # ---- Real credentials -> call the real API --------------------------
     try:
         token = _get_token(c)
+        
+        # Calculate date range
+        today = datetime.now(timezone.utc)
+        since = (today - timedelta(days=window_days)).strftime("%Y-%m-%d")
+        until = today.strftime("%Y-%m-%d")
+        
         resp = requests.get(
             "https://apiv2.shiprocket.in/v1/external/orders",
             headers={"Authorization": f"Bearer {token}"},
-            params={"per_page": 250},
+            params={"per_page": 250, "from": since, "to": until},
             timeout=20,
         )
         resp.raise_for_status()
@@ -69,15 +77,40 @@ def _get_token(c: dict) -> str:
 
 def _map_shiprocket(json_response: dict) -> dict:
     """
-    =========================================================================
-    REPLACE THIS MAPPING WITH REAL RESPONSE PARSING ONCE KEYS ARE ADDED
-    =========================================================================
-    Map raw Shiprocket order lists to delivery status counters:
-      - Iterate over orders in json_response.
-      - Count statuses: "delivered", "in_transit", "canceled", "rto" (returned).
-      - Sum up orders that were cancelled before shipping to 'cancelledRevenue'.
-      - Sum up orders that were shipped but returned to origin as 'rtoRevenue'.
-      - These values will be subtracted from Shopify revenue to find reconciled "true" revenue.
+    Map raw Shiprocket order lists to delivery status counters.
     """
-    # Replace this simple mock fallback with actual parsed values:
-    return {**MOCK_SHIPROCKET}
+    orders = json_response.get("data", [])
+    
+    delivered = 0
+    in_transit = 0
+    cancelled = 0
+    rto = 0
+    
+    cancelled_revenue = 0.0
+    rto_revenue = 0.0
+    
+    for order in orders:
+        status = order.get("status", "").lower()
+        # Shiprocket order total price
+        total_price = float(order.get("total", 0.0))
+        
+        if "delivered" in status:
+            delivered += 1
+        elif "cancelled" in status or "canceled" in status:
+            cancelled += 1
+            cancelled_revenue += total_price
+        elif "rto" in status or "return" in status:
+            rto += 1
+            rto_revenue += total_price
+        else:
+            in_transit += 1
+            
+    return {
+        "totalOrders": len(orders),
+        "delivered": delivered,
+        "in_transit": in_transit,
+        "cancelled": cancelled,
+        "rto": rto,
+        "cancelledRevenue": int(round(cancelled_revenue)),
+        "rtoRevenue": int(round(rto_revenue))
+    }

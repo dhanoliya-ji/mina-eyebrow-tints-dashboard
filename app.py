@@ -21,7 +21,7 @@ from flask import Flask, jsonify, request, send_from_directory
 import config
 from store import get_snapshot
 from settings_store import get_settings, update_settings
-from sync import run_sync, is_syncing, start_scheduler
+from sync import run_sync, is_syncing, start_scheduler, run_all_windows
 import metrics
 import rules
 
@@ -37,12 +37,12 @@ SOURCE_LABELS = {"meta": "Meta Ads", "google": "Google Ads",
 # ---------------------------------------------------------------------------
 #  Build the complete payload the dashboard renders
 # ---------------------------------------------------------------------------
-def build_payload() -> dict:
+def build_payload(window_days: int = 7) -> dict:
     """
-    Take the latest stored source data, run ALL the maths + AI rules, and return
-    one big dictionary the web page can draw directly.
+    Take the stored source data for a specific window, run ALL the maths + AI rules,
+    and return one big dictionary the web page can draw directly.
     """
-    snap = get_snapshot()
+    snap = get_snapshot(window_days=window_days)
     settings = get_settings()
 
     # The data bundle every metrics/rules function expects.
@@ -55,7 +55,17 @@ def build_payload() -> dict:
         "platformCredibility": settings["platformCredibility"],
     }
 
-    # If a sync hasn't populated data yet, tell the page to wait.
+    # If a sync hasn't populated data yet, run an on-demand sync for this window
+    if not bundle["meta"] or not bundle["shopify"]:
+        print(f"[server] no snapshot found for {window_days}d window, running sync...")
+        run_sync(window_days=window_days)
+        snap = get_snapshot(window_days=window_days)
+        bundle["meta"] = snap["meta"]
+        bundle["google"] = snap["google"]
+        bundle["shopify"] = snap["shopify"]
+        bundle["shiprocket"] = snap["shiprocket"]
+        
+    # If still not ready (e.g. sync fails), return not ready
     if not bundle["meta"] or not bundle["shopify"]:
         return {"ready": False}
 
@@ -105,13 +115,16 @@ def home():
 @app.route("/api/dashboard")
 def api_dashboard():
     """The single endpoint the page fetches — fully computed numbers + briefing."""
-    return jsonify(build_payload())
+    window_days = request.args.get("window_days", 7, type=int)
+    return jsonify(build_payload(window_days=window_days))
 
 
 @app.route("/api/refresh", methods=["POST"])
 def api_refresh():
     """The header 'Refresh' button — pull all sources again right now."""
-    result = run_sync()
+    data = request.get_json(force=True, silent=True) or {}
+    window_days = data.get("window_days", 7)
+    result = run_sync(window_days=window_days)
     return jsonify(result)
 
 
@@ -152,7 +165,8 @@ def main():
     print("[server] live sources:", ", ".join(live) if live else
           "none (all using dummy keys - demo/mock data)")
 
-    run_sync()          # pull data once so the page has something to show
+    # Pre-warm cache for standard windows so the user doesn't wait when switching
+    run_all_windows()
     start_scheduler()   # schedule the daily automatic sync
 
     print(f"[server] open http://localhost:{config.PORT}")

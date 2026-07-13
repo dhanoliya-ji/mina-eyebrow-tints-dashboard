@@ -2,7 +2,7 @@
 sync.py
 =======
 The "ingestion" step. It pulls data from all four sources and saves each result
-to the store.
+to the store by date-window.
 
 Two important behaviours the spec requires:
   - PARTIAL-FAILURE SAFE: if one source fails, the others still update. Each
@@ -41,28 +41,27 @@ def is_syncing() -> bool:
     return _is_syncing
 
 
-def run_sync() -> dict:
-    """Pull every source once and store the results. Returns a small summary."""
+def run_sync(window_days: int = 7) -> dict:
+    """Pull every source once and store the results for the specific window. Returns a small summary."""
     global _is_syncing
     if not _lock.acquire(blocking=False):
         return {"skipped": True, "reason": "a sync is already running"}
 
     _is_syncing = True
     started = time.time()
-    print("[sync] starting 7-day pull for all sources...")
+    print(f"[sync] starting {window_days}-day pull for all sources...")
     failures = 0
 
     try:
         for name, fetch in _CONNECTORS.items():
             try:
-                result = fetch()               # call the connector
-                save_source(name, result)      # store its data + status
+                result = fetch(window_days=window_days)       # call the connector with window
+                save_source(name, result, window_days)       # store its data + status for the window
                 tag = "LIVE" if result.get("live") else ("MOCK(err)" if result.get("error") else "MOCK")
                 extra = f" - {result['error']}" if result.get("error") else ""
                 print(f"[sync]   {name:<11} {tag}{extra}")
             except Exception as e:
-                # This should rarely happen (connectors handle their own errors),
-                # but if it does, one broken source must not stop the others.
+                # One broken source must not stop the others.
                 failures += 1
                 print(f"[sync]   {name:<11} HARD FAIL - {e}")
     finally:
@@ -71,6 +70,13 @@ def run_sync() -> dict:
 
     print(f"[sync] done in {int((time.time() - started) * 1000)}ms ({failures} hard failures)")
     return {"ok": True, "failures": failures}
+
+
+def run_all_windows() -> None:
+    """Sync the default time windows to warm up the dashboard database cache."""
+    print("[sync] warming up database cache for 1d, 7d, and 30d windows...")
+    for w in [1, 7, 30]:
+        run_sync(window_days=w)
 
 
 # ---------------------------------------------------------------------------
@@ -86,13 +92,13 @@ def _seconds_until(hour: int, minute: int) -> float:
 
 
 def _scheduler_loop():
-    """Background loop: sleep until the scheduled time, sync, repeat forever."""
+    """Background loop: sleep until the scheduled time, sync default windows, repeat forever."""
     while True:
         wait = _seconds_until(config.SYNC_HOUR, config.SYNC_MINUTE)
         print(f"[sync] next scheduled sync in {int(wait / 3600)}h "
               f"{int((wait % 3600) / 60)}m ({config.SYNC_HOUR:02d}:{config.SYNC_MINUTE:02d})")
         time.sleep(wait)
-        run_sync()
+        run_all_windows()
 
 
 def start_scheduler():
