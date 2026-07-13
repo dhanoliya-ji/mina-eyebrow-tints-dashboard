@@ -1,21 +1,11 @@
 """
 store.py
 ========
-The storage layer of the dashboard. Instead of saving data to a JSON file,
-this module implements a production-grade relational database (SQLite)
-to store all synced metrics, status reports, and source configurations by time window.
+The storage layer of the dashboard. This module implements a hybrid database engine:
+- If a valid `DATABASE_URL` is configured in `.env`, it connects to PostgreSQL.
+- Otherwise, it falls back to a local SQLite database (`data/dashboard.db`).
 
-Database Schema:
-- Table: `source_snapshots`
-  - source_name (TEXT): e.g., 'meta', 'google', 'shopify', 'shiprocket'
-  - window_days (INTEGER): time window length in days (e.g. 1, 7, 30)
-  - data (TEXT): JSON-serialized platform data
-  - last_synced (TEXT): ISO 8601 sync timestamp
-  - ok (INTEGER): Boolean flag (1=Success, 0=Failed)
-  - live (INTEGER): Boolean flag (1=Live API, 0=Mock/Demo)
-  - note (TEXT): Notes or information messages
-  - error (TEXT): Error messages if sync failed
-  - PRIMARY KEY (source_name, window_days)
+Both database engines support composite key storage `(source_name, window_days)`.
 """
 
 import json
@@ -27,44 +17,93 @@ DB_DIR = os.path.join(os.path.dirname(__file__), "data")
 DB_FILE = os.path.join(DB_DIR, "dashboard.db")
 
 
-def init_db() -> None:
-    """Initialize the SQLite database and create necessary tables with composite primary key."""
+def _get_connection():
+    """
+    Connect to PostgreSQL if DATABASE_URL is set and not a DUMMY/placeholder.
+    Otherwise, fall back to SQLite.
+    Returns: (connection, db_type_string)
+    """
+    db_url = os.environ.get("DATABASE_URL")
+    if db_url and not db_url.startswith("DUMMY") and not db_url.startswith("DUMMY_"):
+        try:
+            import psycopg2
+            conn = psycopg2.connect(db_url)
+            return conn, "postgres"
+        except Exception as e:
+            print(f"[db] PostgreSQL connection failed: {e}. Falling back to SQLite...")
+            
+    # SQLite Fallback
     os.makedirs(DB_DIR, exist_ok=True)
     conn = sqlite3.connect(DB_FILE)
+    return conn, "sqlite"
+
+
+def init_db() -> None:
+    """Initialize database tables for PostgreSQL or SQLite."""
+    conn, db_type = _get_connection()
     try:
         cursor = conn.cursor()
         
-        # Auto-migration: check if table lacks the window_days column
-        cursor.execute("PRAGMA table_info(source_snapshots)")
-        cols = [r[1] for r in cursor.fetchall()]
-        if cols and "window_days" not in cols:
-            print("[store] migrating database table source_snapshots...")
-            cursor.execute("DROP TABLE IF EXISTS source_snapshots")
+        if db_type == "postgres":
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS source_snapshots (
+                    source_name VARCHAR(50),
+                    window_days INTEGER,
+                    data TEXT,
+                    last_synced VARCHAR(50),
+                    ok INTEGER,
+                    live INTEGER,
+                    note TEXT,
+                    error TEXT,
+                    PRIMARY KEY (source_name, window_days)
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS settings (
+                    key VARCHAR(50) PRIMARY KEY,
+                    value TEXT
+                )
+            """)
+            print("[db] PostgreSQL database tables initialized successfully.")
+        else:
+            # SQLite specific schema & migration
+            cursor.execute("PRAGMA table_info(source_snapshots)")
+            cols = [r[1] for r in cursor.fetchall()]
+            if cols and "window_days" not in cols:
+                print("[db] migrating SQLite source_snapshots table...")
+                cursor.execute("DROP TABLE IF EXISTS source_snapshots")
+                
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS source_snapshots (
+                    source_name TEXT,
+                    window_days INTEGER,
+                    data TEXT,
+                    last_synced TEXT,
+                    ok INTEGER,
+                    live INTEGER,
+                    note TEXT,
+                    error TEXT,
+                    PRIMARY KEY (source_name, window_days)
+                )
+            """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT
+                )
+            """)
             
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS source_snapshots (
-                source_name TEXT,
-                window_days INTEGER,
-                data TEXT,
-                last_synced TEXT,
-                ok INTEGER,
-                live INTEGER,
-                note TEXT,
-                error TEXT,
-                PRIMARY KEY (source_name, window_days)
-            )
-        """)
         conn.commit()
     except Exception as e:
-        print("[store] database initialization failed:", e)
+        print(f"[db] table initialization failed on {db_type}:", e)
     finally:
         conn.close()
 
 
 def get_snapshot(window_days: int = 7) -> dict:
     """
-    Read the snapshots for a specific time window from SQLite and format them in the structure
-    expected by the rest of the application.
+    Read the snapshots for a specific time window from the active database
+    and format them in the structure expected by the rest of the application.
     """
     init_db()
     snapshot = {
@@ -75,13 +114,31 @@ def get_snapshot(window_days: int = 7) -> dict:
         "sources": {},
     }
 
+    conn, db_type = _get_connection()
     try:
-        conn = sqlite3.connect(DB_FILE)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM source_snapshots WHERE window_days = ?", (window_days,))
-        rows = cursor.fetchall()
-        conn.close()
+        # For SQLite, we can configure row_factory to get dictionaries
+        if db_type == "sqlite":
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM source_snapshots WHERE window_days = ?", (window_days,))
+            rows = cursor.fetchall()
+        else:
+            # PostgreSQL connection
+            cursor = conn.cursor()
+            cursor.execute("SELECT source_name, data, last_synced, ok, live, note, error FROM source_snapshots WHERE window_days = %s", (window_days,))
+            db_rows = cursor.fetchall()
+            # Map Postgres tuples to dictionary-like objects
+            rows = []
+            for r in db_rows:
+                rows.append({
+                    "source_name": r[0],
+                    "data": r[1],
+                    "last_synced": r[2],
+                    "ok": r[3],
+                    "live": r[4],
+                    "note": r[5],
+                    "error": r[6],
+                })
 
         for row in rows:
             name = row["source_name"]
@@ -97,19 +154,20 @@ def get_snapshot(window_days: int = 7) -> dict:
                 "error": row["error"],
             }
     except Exception as e:
-        print(f"[store] error loading snapshot from database for window_days {window_days}:", e)
+        print(f"[db] error loading snapshot from {db_type} for window_days {window_days}:", e)
+    finally:
+        conn.close()
 
     return snapshot
 
 
 def save_source(name: str, result: dict, window_days: int = 7) -> None:
     """
-    Save one source's freshly-pulled data and its status in the SQLite database
-    using a composite upsert SQL statement (INSERT ON CONFLICT(source_name, window_days) UPDATE).
+    Save one source's freshly-pulled data and its status in the active database.
     """
     init_db()
+    conn, db_type = _get_connection()
     try:
-        conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
 
         raw_data = json.dumps(result["data"])
@@ -119,19 +177,35 @@ def save_source(name: str, result: dict, window_days: int = 7) -> None:
         note = result.get("note")
         error = result.get("error")
 
-        cursor.execute("""
-            INSERT INTO source_snapshots (source_name, window_days, data, last_synced, ok, live, note, error)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(source_name, window_days) DO UPDATE SET
-                data=excluded.data,
-                last_synced=excluded.last_synced,
-                ok=excluded.ok,
-                live=excluded.live,
-                note=excluded.note,
-                error=excluded.error
-        """, (name, window_days, raw_data, last_synced, ok, live, note, error))
+        if db_type == "postgres":
+            # PostgreSQL upsert (INSERT ON CONFLICT)
+            cursor.execute("""
+                INSERT INTO source_snapshots (source_name, window_days, data, last_synced, ok, live, note, error)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT(source_name, window_days) DO UPDATE SET
+                    data=EXCLUDED.data,
+                    last_synced=EXCLUDED.last_synced,
+                    ok=EXCLUDED.ok,
+                    live=EXCLUDED.live,
+                    note=EXCLUDED.note,
+                    error=EXCLUDED.error
+            """, (name, window_days, raw_data, last_synced, ok, live, note, error))
+        else:
+            # SQLite upsert
+            cursor.execute("""
+                INSERT INTO source_snapshots (source_name, window_days, data, last_synced, ok, live, note, error)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(source_name, window_days) DO UPDATE SET
+                    data=excluded.data,
+                    last_synced=excluded.last_synced,
+                    ok=excluded.ok,
+                    live=excluded.live,
+                    note=excluded.note,
+                    error=excluded.error
+            """, (name, window_days, raw_data, last_synced, ok, live, note, error))
 
         conn.commit()
-        conn.close()
     except Exception as e:
-        print(f"[store] error writing {name} snapshot to database for window_days {window_days}:", e)
+        print(f"[db] error writing {name} snapshot to {db_type} for window_days {window_days}:", e)
+    finally:
+        conn.close()
