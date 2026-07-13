@@ -7,17 +7,11 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <!-- The whole dashboard is drawn by JavaScript into this one container.
-       The JS asks Python for the numbers (GET /api/dashboard) and builds the
-       page from them. Python does all the maths; this page just displays it. -->
   <div class="app" id="app">
-    <p style="color:var(--text-muted);padding:40px 0">Loading Mina Eyebrow Tints AI Automation Dashboard…</p>
+    <p class="loading-msg">Loading dashboard…</p>
   </div>
 
   <script>
-  // =========================================================================
-  //  Formatting helpers — turn raw numbers into nice display text.
-  // =========================================================================
   const inr      = n => '₹' + Math.round(n).toLocaleString('en-IN');
   const xRoas    = n => n.toFixed(1) + '×';
   const pctWhole = n => Math.round(n * 100) + '%';
@@ -32,30 +26,9 @@
   }
   const clock = iso => iso ? new Date(iso).toLocaleTimeString('en-IN',
                        { hour: 'numeric', minute: '2-digit', hour12: true }) : '—';
-  function ago(iso) {
-    if (!iso) return '—';
-    const mins = Math.round((Date.now() - new Date(iso)) / 60000);
-    if (mins < 1) return 'just now';
-    if (mins < 60) return mins + 'm ago';
-    return Math.floor(mins / 60) + 'h ago';
-  }
-  const fmtValue = (v, f) => f === 'inr' ? inr(v) : f === 'x' ? xRoas(v)
-                           : f === 'int' ? intFmt(v) : v;
 
-  // =========================================================================
-  //  Page state (things the user can toggle in the browser).
-  // =========================================================================
-  const state = {
-    theme: 'light',      // light / dark
-    range: '7 days',     // date range chip
-    channel: 'All',      // All / Meta / Google filter
-    openCampaign: null,  // which campaign row is expanded
-    data: null,          // the latest payload from Python
-    mode: 'loading',     // loading / live / offline
-    syncing: false,
-  };
+  const state = { range: '7 days', channel: 'All', data: null, syncing: false };
 
-  // Helper to extract numeric window days from state.range (e.g. '7 days' -> 7, 'Today' -> 1)
   function getWindowDays() {
     if (state.range === 'Today') return 1;
     if (state.range === '30 days') return 30;
@@ -63,45 +36,32 @@
     return isNaN(parsed) ? 7 : parsed;
   }
 
-  // =========================================================================
-  //  Talking to the Python backend.
-  // =========================================================================
   async function loadData() {
     const days = getWindowDays();
     try {
       const res = await fetch(`/api/dashboard?window_days=${days}`);
       const d = await res.json();
-      if (!d.ready) { setTimeout(loadData, 1000); return; } // sync not done yet
+      if (!d.ready) { setTimeout(loadData, 1000); return; }
       state.data = d;
-      state.mode = d.mode === 'live' ? 'live' : 'offline';
       render();
     } catch (e) {
-      state.mode = 'offline';
       document.getElementById('app').innerHTML =
-        '<p style="color:var(--bad-fg);padding:40px 0">Could not reach the backend. ' +
-        'Is <code>python app.py</code> running?</p>';
+        '<p class="error-msg">Could not reach the backend. Run <code>python app.py</code> first.</p>';
     }
   }
 
   async function refresh() {
     state.syncing = true; render();
-    const days = getWindowDays();
-    try { 
-      await fetch('/api/refresh', { 
+    try {
+      await fetch('/api/refresh', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ window_days: days })
-      }); 
-      await loadData(); 
-    }
-    finally { state.syncing = false; render(); }
+        body: JSON.stringify({ window_days: getWindowDays() }),
+      });
+      await loadData();
+    } finally { state.syncing = false; render(); }
   }
 
-  // =========================================================================
-  //  Small HTML builders for repeated pieces.
-  // =========================================================================
-
-  // A coloured up/down delta for a KPI tile.
   function deltaHtml(value, prev, goodUp, fmt) {
     if (prev == null) return '';
     const diff = value - prev;
@@ -114,10 +74,9 @@
     const shown = fmt === 'x' ? xRoas(Math.abs(diff))
                 : fmt === 'int' ? intFmt(Math.abs(diff)) : inrShort(Math.abs(diff));
     return `<span class="kpi-delta ${cls} num">${arrow} ${shown}
-            <span style="color:var(--text-faint);font-weight:400">(${pctWhole(Math.abs(pct))})</span></span>`;
+            <span class="delta-pct">(${pctWhole(Math.abs(pct))})</span></span>`;
   }
 
-  // One briefing block (Improved / Got worse / Stuck / Escalate).
   function briefBlock(kicker, cls, items) {
     if (!items || !items.length) return '';
     const lines = items.map((t, i) =>
@@ -127,69 +86,49 @@
             </div></div>`;
   }
 
-  // =========================================================================
-  //  The main render — rebuilds the whole page from state.data.
-  // =========================================================================
   function render() {
-    document.documentElement.setAttribute('data-theme', state.theme);
     const d = state.data;
     if (!d) return;
 
-    const rec = d.reconciliation;
     const k = d.kpis;
     const lastSync = (d.sources.find(s => s.source === 'Shopify') || {}).lastSynced;
+    const metaAttrib = d.attribution.find(a => a.name.startsWith('Meta'));
+    const googleAttrib = d.attribution.find(a => a.name.startsWith('Google'));
 
-    // ---- Header ----
     const header = `
       <header class="header">
         <div class="header-left">
           <div class="brand-mark">m</div>
           <div>
             <div class="brand-name">Mina Eyebrow Tints · AI Automation Dashboard</div>
-            <div class="brand-sub">minaeyebrowtints.in · data as of ${clock(lastSync)} IST</div>
+            <div class="brand-sub">minaeyebrowtints.in · synced ${clock(lastSync)} IST</div>
           </div>
         </div>
-        <div class="header-right">
-          <span class="pill ${state.mode === 'live' ? 'pill-good' : 'pill-warn'}">
-            <span class="dot"></span> ${state.mode === 'live' ? 'Backend live' : 'Offline · mock'}
-          </span>
-          <span class="pill ${rec.collectedFactor > 0 ? 'pill-good' : 'pill-warn'}">
-            <span class="dot"></span> Reconciled · ${pctWhole(rec.deliveredRate)} delivered
-          </span>
-          <button class="btn" id="refreshBtn" ${state.syncing ? 'disabled' : ''}>
-            <span class="${state.syncing ? 'spin' : ''}">↻</span>
-            ${state.syncing ? 'Syncing…' : 'Refresh'}
-          </button>
-          <button class="btn icon-btn" id="themeBtn">${state.theme === 'dark' ? '☀' : '☾'}</button>
-        </div>
+        <button class="btn" id="refreshBtn" ${state.syncing ? 'disabled' : ''}>
+          <span class="${state.syncing ? 'spin' : ''}">↻</span>
+          ${state.syncing ? 'Syncing…' : 'Refresh'}
+        </button>
       </header>`;
 
-    // ---- Source sync chips ----
-    const srcStrip = `<div class="src-strip">${d.sources.map(s => `
-      <span class="src-chip">
-        <span class="dot" style="color:${s.ok ? 'var(--good-fg)' : 'var(--bad-fg)'}"></span>
-        ${s.source} · ${s.ok ? `${s.live ? 'live' : 'mock'} · synced ${ago(s.lastSynced)}` : 'sync failed'}
-      </span>`).join('')}</div>`;
-
-    // ---- Toolbar (range + channel filters) ----
     const seg = (opts, cur, group) => `<div class="seg">${opts.map(o =>
       `<button class="${cur === o ? 'active' : ''}" data-${group}="${o}">${o}</button>`).join('')}</div>`;
-      
-    // Determine active ranges: dynamically display custom range if selected
-    const baseRanges = ['Today', '7 days', '30 days'];
-    const rangeOptions = baseRanges.includes(state.range) ? baseRanges : [...baseRanges, state.range];
 
     const toolbar = `<div class="toolbar">
-        <span class="toolbar-label">Range</span>${seg(rangeOptions, state.range, 'range')}
-        <button class="btn btn-sm" id="customRangeBtn" style="margin-left:4px;padding:3px 8px;font-size:11px;border-radius:4px">Custom...</button>
-        <span class="toolbar-label" style="margin-left:8px">Channel</span>${seg(['All', 'Meta', 'Google'], state.channel, 'channel')}
+        <span class="toolbar-label">Range</span>${seg(['Today', '7 days', '30 days'], state.range, 'range')}
+        <span class="toolbar-label">Channel</span>${seg(['All', 'Meta', 'Google'], state.channel, 'channel')}
       </div>`;
 
-    // ---- KPI row (6 tiles) ----
     const tiles = [
-      ['Shopify revenue (true)', k.trueRevenue], ['Total ad spend', k.adSpend],
-      ['MER (blended)', k.mer], ['Blended CAC', k.cac], ['Orders', k.orders], ['AOV', k.aov],
+      ['Total Shopify revenue', k.trueRevenue],
+      ['Total ad spend', k.adSpend],
+      ['MER', k.mer],
+      ['Blended CAC', k.cac],
+      ['Orders', k.orders],
+      ['AOV', k.aov],
     ];
+    const fmtValue = (v, f) => f === 'inr' ? inr(v) : f === 'x' ? xRoas(v)
+                             : f === 'int' ? intFmt(v) : v;
+
     const kpiRow = `<div class="kpi-grid">${tiles.map(([label, t]) => `
       <div class="kpi">
         <div class="kpi-label">${label}</div>
@@ -197,60 +136,82 @@
         ${deltaHtml(t.value, t.prev, t.goodUp, t.fmt)}
       </div>`).join('')}</div>`;
 
-    // ---- AI briefing (hero card) ----
+    const channelSpend = `
+      <div class="channel-spend">
+        <span class="cs-label">Channel spend</span>
+        <span class="cs-item"><strong>Meta</strong> <span class="num">${inr(metaAttrib.spend)}</span></span>
+        <span class="cs-sep">·</span>
+        <span class="cs-item"><strong>Google</strong> <span class="num">${inr(googleAttrib.spend)}</span></span>
+        <span class="cs-sep">·</span>
+        <span class="cs-item"><strong>Total</strong> <span class="num">${inr(k.adSpend.value)}</span></span>
+      </div>`;
+
     const b = d.briefing;
     const todoList = b.todo.map((t, i) =>
       `<div class="todo"><span class="todo-rank num">${i + 1}</span>
        <span class="brief-text">${t}</span></div>`).join('');
+
     const briefing = `
-      <div class="card" style="margin-top:12px">
+      <div class="card">
         <div class="card-head">
-          <div class="card-title">Today's briefing</div>
-          <span class="pill pill-neutral">AI · reconciled revenue</span>
+          <div class="card-title">AI daily insights</div>
+          <span class="card-sub">Shopify reconciled revenue is source of truth</span>
         </div>
-        <div class="brief-text" style="margin-bottom:14px;color:var(--text-muted)">${b.changed}</div>
-        ${b.escalate.length ? `<div style="margin-bottom:12px">${briefBlock('Escalate', 'brief-escalate', b.escalate)}</div>` : ''}
+        <div class="brief-kicker">What changed?</div>
+        <div class="brief-text changed-line">${b.changed}</div>
         <div class="briefing-grid">
-          ${briefBlock('Improved', 'brief-good', b.improved)}
-          ${briefBlock('Got worse', 'brief-bad', b.worse)}
-          ${briefBlock('Stuck / watch', 'brief-warn', b.stuck)}
+          ${briefBlock('What improved', 'brief-good', b.improved)}
+          ${briefBlock('What got worse', 'brief-bad', b.worse)}
+          ${briefBlock('What is stuck', 'brief-warn', b.stuck)}
+          ${b.escalate.length ? briefBlock('What needs escalation', 'brief-escalate', b.escalate) : ''}
           <div class="brief-row brief-do"><div style="width:100%">
-            <div class="brief-kicker">Do today</div>
+            <div class="brief-kicker">What should we do today?</div>
             <div class="todo-list">${todoList}</div>
           </div></div>
         </div>
       </div>`;
 
-    // ---- Attribution cards (filtered by channel) ----
-    const attribCards = d.attribution
-      .filter(a => state.channel === 'All' || a.name.startsWith(state.channel))
-      .map(a => `
+    function attribCard(a) {
+      if (!a) return '';
+      return `
         <div class="card">
           <div class="card-head">
-            <div class="card-title">${a.name} · attribution</div>
-            <span class="card-sub">spend ${inr(a.spend)}</span>
+            <div class="card-title">${a.name}</div>
+            <span class="card-sub">Spend ${inr(a.spend)}</span>
           </div>
           <div class="roas-row">
-            <div class="roas-box"><div class="lbl">1-day click ROAS</div>
-              <div class="val num">${xRoas(a.roas1d)}</div><div class="card-sub">immediate intent</div></div>
-            <div class="roas-box"><div class="lbl">7-day click ROAS</div>
-              <div class="val num">${xRoas(a.roas7d)}</div><div class="card-sub">delayed impact</div></div>
+            <div class="roas-box">
+              <div class="lbl">1-day click ROAS</div>
+              <div class="val num">${xRoas(a.roas1d)}</div>
+              <div class="card-sub">Immediate purchase intent</div>
+            </div>
+            <div class="roas-box">
+              <div class="lbl">7-day click ROAS</div>
+              <div class="val num">${xRoas(a.roas7d)}</div>
+              <div class="card-sub">Delayed ad impact</div>
+            </div>
           </div>
-          <div class="reconcile-line"><span class="rl-label">Platform-reported revenue (7d)</span>
+          <div class="reconcile-line"><span class="rl-label">Platform revenue (1-day click)</span>
+            <span class="rl-val num">${inr(a.reportedRev1d)}</span></div>
+          <div class="reconcile-line"><span class="rl-label">Platform revenue (7-day click)</span>
             <span class="rl-val num">${inr(a.reportedRev7d)}</span></div>
-          <div class="reconcile-line"><span class="rl-label">Shopify actual (true, reconciled)</span>
+          <div class="reconcile-line"><span class="rl-label">Shopify actual (reconciled)</span>
             <span class="rl-val num">${inr(a.trueRev)}</span></div>
-          <div class="reconcile-line"><span class="rl-label">Over-report</span>
-            <span class="rl-val num" style="color:var(--bad-fg)">+${inr(a.overReportAbs)} (${pctWhole(a.overReportPct)})</span></div>
-          <div class="footnote">True ROAS on collected revenue: <strong>${xRoas(a.trueRoas)}</strong>.
-            Judge budget on this, not the platform number.</div>
-        </div>`).join('');
+          <div class="reconcile-line diff-line"><span class="rl-label">Platform vs Shopify gap</span>
+            <span class="rl-val num over-report">+${inr(a.overReportAbs)} (${pctWhole(a.overReportPct)})</span></div>
+        </div>`;
+    }
 
-    // ---- Shopify funnel ----
+    const attribSection = d.attribution
+      .filter(a => state.channel === 'All' || a.name.startsWith(state.channel))
+      .map(attribCard).join('');
+
     const funnel = `
       <div class="card">
-        <div class="card-head"><div class="card-title">Shopify funnel</div>
-          <span class="card-sub">last ${state.range}</span></div>
+        <div class="card-head">
+          <div class="card-title">Shopify funnel</div>
+          <span class="card-sub">${state.range}</span>
+        </div>
         <div class="funnel">${d.funnel.map(s => `
           <div class="funnel-step">
             <div class="funnel-meta">
@@ -262,118 +223,74 @@
           </div>`).join('')}</div>
       </div>`;
 
-    // ---- SKU table ----
     const skus = `
       <div class="card">
-        <div class="card-head"><div class="card-title">SKU performance</div>
-          <span class="card-sub">stock-out forecast at current velocity</span></div>
+        <div class="card-head">
+          <div class="card-title">SKU performance</div>
+          <span class="card-sub">Revenue, units & inventory</span>
+        </div>
         <table class="tbl">
-          <thead><tr><th>Product</th><th class="r">Units</th><th class="r">Revenue</th>
-            <th class="r hide-sm">Stock</th><th class="r">Cover</th></tr></thead>
+          <thead><tr>
+            <th>Product</th><th class="r">Units</th><th class="r">Revenue</th>
+            <th class="r hide-sm">Stock</th><th class="r hide-sm">Cover</th>
+          </tr></thead>
           <tbody>${d.skus.map(s => `
             <tr>
               <td><div class="sku-name">${s.name}</div><div class="sku-sub num">${s.sku}</div></td>
               <td class="r num">${intFmt(s.units)}</td>
               <td class="r num">${inr(s.revenue)}</td>
               <td class="r num hide-sm">${intFmt(s.inventory)}</td>
-              <td class="r">${s.stockOut
-                ? `<span class="warn-tag">⚠ ${Math.round(s.daysToStockOut)}d left</span>`
-                : `<span class="num" style="color:var(--text-muted)">${Math.round(s.daysToStockOut)}d</span>`}</td>
+              <td class="r hide-sm">${s.stockOut
+                ? `<span class="warn-tag">${Math.round(s.daysToStockOut)}d left</span>`
+                : `<span class="num muted">${Math.round(s.daysToStockOut)}d</span>`}</td>
             </tr>`).join('')}</tbody>
         </table>
       </div>`;
 
-    // ---- Campaigns + AI action (filtered by channel, with drill-down) ----
     const actionClass = { scale: 'act-scale', cut: 'act-cut', hold: 'act-hold', keep: 'act-keep' };
     const camps = d.campaigns.filter(c => state.channel === 'All' || c.channel === state.channel);
     const campaigns = `
       <div class="card">
-        <div class="card-head"><div class="card-title">Campaigns · AI recommended action</div>
-          <span class="card-sub">tap a row to drill into ad sets</span></div>
+        <div class="card-head">
+          <div class="card-title">Campaign AI recommendations</div>
+          <span class="card-sub">Judged on true ROAS, not platform numbers</span>
+        </div>
         <table class="tbl">
-          <thead><tr><th>Campaign</th><th class="r hide-sm">Spend</th><th class="r">1d ROAS</th>
-            <th class="r">7d ROAS</th><th class="r hide-sm">True ROAS</th><th class="r">Action</th></tr></thead>
-          <tbody>${camps.map(c => {
-            const openRow = state.openCampaign === c.id ? `
-              <tr class="expand-row"><td colspan="6">
-                <div style="padding:4px 10px 10px">
-                  <div class="footnote" style="margin-bottom:8px">${c.why}</div>
-                  <table class="subtbl">
-                    <thead><tr><th>Ad set</th><th class="r">Spend</th><th class="r">1d ROAS</th><th class="r">7d ROAS</th></tr></thead>
-                    <tbody>${c.subs.map(s => `<tr>
-                      <td>${s.name}</td><td class="r num">${inr(s.spend)}</td>
-                      <td class="r num">${xRoas(s.roas1d)}</td><td class="r num">${xRoas(s.roas7d)}</td></tr>`).join('')}
-                    </tbody>
-                  </table>
-                </div></td></tr>` : '';
-            return `
-              <tr class="clickable" data-campaign="${c.id}">
-                <td><div class="sku-name">${c.name}</div><div class="sku-sub">${c.channel} · ${c.type}</div></td>
-                <td class="r num hide-sm">${inr(c.spend)}</td>
-                <td class="r num">${xRoas(c.roas1d)}</td>
-                <td class="r num">${xRoas(c.roas7d)}</td>
-                <td class="r num hide-sm">${xRoas(c.trueRoas)}</td>
-                <td class="r"><span class="action-pill ${actionClass[c.action]}">${c.label}</span></td>
-              </tr>${openRow}`;
-          }).join('')}</tbody>
+          <thead><tr>
+            <th>Campaign</th><th class="r">Spend</th><th class="r">1d ROAS</th>
+            <th class="r">7d ROAS</th><th class="r hide-sm">True ROAS</th><th>Action</th>
+          </tr></thead>
+          <tbody>${camps.map(c => `
+            <tr>
+              <td>
+                <div class="sku-name">${c.name}</div>
+                <div class="sku-sub">${c.channel} · ${c.type}</div>
+                <div class="campaign-why">${c.why}</div>
+              </td>
+              <td class="r num">${inr(c.spend)}</td>
+              <td class="r num">${xRoas(c.roas1d)}</td>
+              <td class="r num">${xRoas(c.roas7d)}</td>
+              <td class="r num hide-sm">${xRoas(c.trueRoas)}</td>
+              <td><span class="action-pill ${actionClass[c.action]}">${c.label}</span></td>
+            </tr>`).join('')}</tbody>
         </table>
       </div>`;
 
-    // ---- Assemble the page ----
     document.getElementById('app').innerHTML =
-      header + srcStrip + toolbar + kpiRow + briefing +
-      `<div class="section-title">Attribution · 1-day vs 7-day, platform vs true</div>
-       <div class="attrib-grid">${attribCards}</div>
+      header + toolbar + kpiRow + channelSpend + briefing +
+      `<div class="section-title">Attribution · 1-day vs 7-day, platform vs Shopify</div>
+       <div class="attrib-grid">${attribSection}</div>
        <div class="section-title">Store performance</div>
        <div class="grid-2">${funnel}${skus}</div>
-       <div class="section-title">Recommendations</div>${campaigns}
-       <div class="footnote" style="margin-top:24px;text-align:center">
-         Revenue everywhere is reconciled true revenue (Shopify orders − refunds − cancellations − RTO,
-         cross-checked with Shiprocket). Platform revenue appears only in the attribution cards.
-         ${state.mode === 'offline' ? ' Backend unreachable — showing bundled mock data.' : ''}
-       </div>`;
+       <div class="section-title">Campaign actions</div>${campaigns}`;
 
-    wireEvents();
-  }
-
-  // =========================================================================
-  //  Wire up clicks after each render (buttons, filters, drill-down rows).
-  // =========================================================================
-  function wireEvents() {
-    document.getElementById('themeBtn').onclick = () => {
-      state.theme = state.theme === 'dark' ? 'light' : 'dark'; render();
-    };
     document.getElementById('refreshBtn').onclick = refresh;
-
     document.querySelectorAll('[data-range]').forEach(el =>
       el.onclick = () => { state.range = el.dataset.range; loadData(); });
     document.querySelectorAll('[data-channel]').forEach(el =>
       el.onclick = () => { state.channel = el.dataset.channel; render(); });
-    document.querySelectorAll('[data-campaign]').forEach(el =>
-      el.onclick = () => {
-        state.openCampaign = state.openCampaign === el.dataset.campaign ? null : el.dataset.campaign;
-        render();
-      });
-      
-    // Wire custom range button
-    const customBtn = document.getElementById('customRangeBtn');
-    if (customBtn) {
-      customBtn.onclick = () => {
-        const val = prompt("Enter custom window in days (e.g. 14, 45, 90):", "14");
-        if (val) {
-          const parsed = parseInt(val);
-          if (!isNaN(parsed) && parsed > 0) {
-            state.range = parsed + " days";
-            loadData();
-          } else {
-            alert("Please enter a valid positive number of days.");
-          }
-        }
-      };
-    }
   }
 
-  // Kick everything off.
   loadData();
   </script>
 </body>

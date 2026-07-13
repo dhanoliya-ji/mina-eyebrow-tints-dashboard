@@ -72,14 +72,16 @@ def topline(d: dict) -> dict:
     cac = _div(ad_spend, new_customers)               # Blended cost to acquire a customer
     aov = _div(rec["trueRevenue"], orders)            # Average order value
 
-    p = d["shopify"]["prev"]
+    # Live connectors (e.g. real Shopify) may not supply yesterday's figures.
+    # Fall back to the current value so deltas render flat instead of crashing.
+    p = d["shopify"].get("prev") or {}
     return {
-        "trueRevenue": {"value": rec["trueRevenue"], "prev": p["trueRevenue"], "goodUp": True, "fmt": "inr"},
-        "adSpend":     {"value": ad_spend,           "prev": p["adSpend"],     "goodUp": None, "fmt": "inr"},
-        "mer":         {"value": mer,                "prev": p["mer"],         "goodUp": True, "fmt": "x"},
-        "cac":         {"value": cac,                "prev": p["cac"],         "goodUp": False, "fmt": "inr"},
-        "orders":      {"value": orders,             "prev": p["orders"],      "goodUp": True, "fmt": "int"},
-        "aov":         {"value": aov,                "prev": p["aov"],         "goodUp": True, "fmt": "inr"},
+        "trueRevenue": {"value": rec["trueRevenue"], "prev": p.get("trueRevenue", rec["trueRevenue"]), "goodUp": True, "fmt": "inr"},
+        "adSpend":     {"value": ad_spend,           "prev": p.get("adSpend", ad_spend),               "goodUp": None, "fmt": "inr"},
+        "mer":         {"value": mer,                "prev": p.get("mer", mer),                         "goodUp": True, "fmt": "x"},
+        "cac":         {"value": cac,                "prev": p.get("cac", cac),                         "goodUp": False, "fmt": "inr"},
+        "orders":      {"value": orders,             "prev": p.get("orders", orders),                   "goodUp": True, "fmt": "int"},
+        "aov":         {"value": aov,                "prev": p.get("aov", aov),                         "goodUp": True, "fmt": "inr"},
     }
 
 
@@ -96,6 +98,7 @@ def _build_attrib(name, spend, val_1d, val_7d, true_factor):
         "roas1d": _div(val_1d, spend),
         "roas7d": _div(val_7d, spend),
         "trueRoas": _div(true_rev, spend),
+        "reportedRev1d": val_1d,
         "reportedRev7d": val_7d,
         "trueRev": true_rev,
         "overReportAbs": over_report,
