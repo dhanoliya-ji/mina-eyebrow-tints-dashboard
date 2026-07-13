@@ -5,7 +5,8 @@ The storage layer of the dashboard. This module implements a hybrid database eng
 - If a valid `DATABASE_URL` is configured in `.env`, it connects to PostgreSQL.
 - Otherwise, it falls back to a local SQLite database (`data/dashboard.db`).
 
-Both database engines support composite key storage `(source_name, window_days)`.
+Supports historical time-series database logging: every single refresh saves a new
+record with a unique timestamp, preserving the full historical metrics logs.
 """
 
 import json
@@ -39,12 +40,33 @@ def _get_connection():
 
 
 def init_db() -> None:
-    """Initialize database tables for PostgreSQL or SQLite."""
+    """Initialize database tables for PostgreSQL or SQLite, automatically migrating schemas."""
     conn, db_type = _get_connection()
     try:
         cursor = conn.cursor()
         
         if db_type == "postgres":
+            # Check if source_snapshots table exists and inspect its primary key columns
+            cursor.execute("""
+                SELECT EXISTS (
+                    SELECT FROM information_schema.tables 
+                    WHERE table_name = 'source_snapshots'
+                );
+            """)
+            exists = cursor.fetchone()[0]
+            if exists:
+                cursor.execute("""
+                    SELECT a.attname
+                    FROM pg_index i
+                    JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+                    WHERE i.indrelid = 'source_snapshots'::regclass AND i.indisprimary;
+                """)
+                pk_cols = [r[0] for r in cursor.fetchall()]
+                # If last_synced is not in the primary key, drop table to migrate it
+                if "last_synced" not in pk_cols:
+                    print("[db] migrating PostgreSQL source_snapshots to time-series...")
+                    cursor.execute("DROP TABLE IF EXISTS source_snapshots")
+            
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS source_snapshots (
                     source_name VARCHAR(50),
@@ -55,7 +77,7 @@ def init_db() -> None:
                     live INTEGER,
                     note TEXT,
                     error TEXT,
-                    PRIMARY KEY (source_name, window_days)
+                    PRIMARY KEY (source_name, window_days, last_synced)
                 )
             """)
             cursor.execute("""
@@ -66,12 +88,14 @@ def init_db() -> None:
             """)
             print("[db] PostgreSQL database tables initialized successfully.")
         else:
-            # SQLite specific schema & migration
+            # SQLite migration check
             cursor.execute("PRAGMA table_info(source_snapshots)")
-            cols = [r[1] for r in cursor.fetchall()]
-            if cols and "window_days" not in cols:
-                print("[db] migrating SQLite source_snapshots table...")
-                cursor.execute("DROP TABLE IF EXISTS source_snapshots")
+            rows = cursor.fetchall()
+            if rows:
+                pk_cols = [r[1] for r in rows if r[5] > 0]
+                if "last_synced" not in pk_cols:
+                    print("[db] migrating SQLite source_snapshots to time-series...")
+                    cursor.execute("DROP TABLE IF EXISTS source_snapshots")
                 
             cursor.execute("""
                 CREATE TABLE IF NOT EXISTS source_snapshots (
@@ -83,7 +107,7 @@ def init_db() -> None:
                     live INTEGER,
                     note TEXT,
                     error TEXT,
-                    PRIMARY KEY (source_name, window_days)
+                    PRIMARY KEY (source_name, window_days, last_synced)
                 )
             """)
             cursor.execute("""
@@ -102,8 +126,8 @@ def init_db() -> None:
 
 def get_snapshot(window_days: int = 7) -> dict:
     """
-    Read the snapshots for a specific time window from the active database
-    and format them in the structure expected by the rest of the application.
+    Read the latest snapshots for a specific time window from the active database
+    using a subquery to match the maximum last_synced timestamp.
     """
     init_db()
     snapshot = {
@@ -116,18 +140,29 @@ def get_snapshot(window_days: int = 7) -> dict:
 
     conn, db_type = _get_connection()
     try:
-        # For SQLite, we can configure row_factory to get dictionaries
+        # Standard SQL query matching max(last_synced) for each source
+        query = """
+            SELECT s.source_name, s.data, s.last_synced, s.ok, s.live, s.note, s.error
+            FROM source_snapshots s
+            INNER JOIN (
+                SELECT source_name, MAX(last_synced) as max_sync
+                FROM source_snapshots
+                WHERE window_days = {}
+                GROUP BY source_name
+            ) m ON s.source_name = m.source_name AND s.last_synced = m.max_sync
+            WHERE s.window_days = {}
+        """
+        
         if db_type == "sqlite":
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM source_snapshots WHERE window_days = ?", (window_days,))
+            cursor.execute(query.format("?", "?"), (window_days, window_days))
             rows = cursor.fetchall()
         else:
-            # PostgreSQL connection
+            # PostgreSQL
             cursor = conn.cursor()
-            cursor.execute("SELECT source_name, data, last_synced, ok, live, note, error FROM source_snapshots WHERE window_days = %s", (window_days,))
+            cursor.execute(query.format("%s", "%s"), (window_days, window_days))
             db_rows = cursor.fetchall()
-            # Map Postgres tuples to dictionary-like objects
             rows = []
             for r in db_rows:
                 rows.append({
@@ -144,7 +179,6 @@ def get_snapshot(window_days: int = 7) -> dict:
             name = row["source_name"]
             raw_data = row["data"]
             
-            # Map database columns to the memory structure
             snapshot[name] = json.loads(raw_data) if raw_data else None
             snapshot["sources"][name] = {
                 "lastSynced": row["last_synced"],
@@ -163,7 +197,7 @@ def get_snapshot(window_days: int = 7) -> dict:
 
 def save_source(name: str, result: dict, window_days: int = 7) -> None:
     """
-    Save one source's freshly-pulled data and its status in the active database.
+    Append a new historical record for this source snapshot to the database.
     """
     init_db()
     conn, db_type = _get_connection()
@@ -178,34 +212,18 @@ def save_source(name: str, result: dict, window_days: int = 7) -> None:
         error = result.get("error")
 
         if db_type == "postgres":
-            # PostgreSQL upsert (INSERT ON CONFLICT)
             cursor.execute("""
                 INSERT INTO source_snapshots (source_name, window_days, data, last_synced, ok, live, note, error)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT(source_name, window_days) DO UPDATE SET
-                    data=EXCLUDED.data,
-                    last_synced=EXCLUDED.last_synced,
-                    ok=EXCLUDED.ok,
-                    live=EXCLUDED.live,
-                    note=EXCLUDED.note,
-                    error=EXCLUDED.error
             """, (name, window_days, raw_data, last_synced, ok, live, note, error))
         else:
-            # SQLite upsert
             cursor.execute("""
                 INSERT INTO source_snapshots (source_name, window_days, data, last_synced, ok, live, note, error)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(source_name, window_days) DO UPDATE SET
-                    data=excluded.data,
-                    last_synced=excluded.last_synced,
-                    ok=excluded.ok,
-                    live=excluded.live,
-                    note=excluded.note,
-                    error=excluded.error
             """, (name, window_days, raw_data, last_synced, ok, live, note, error))
 
         conn.commit()
     except Exception as e:
-        print(f"[db] error writing {name} snapshot to {db_type} for window_days {window_days}:", e)
+        print(f"[db] error appending {name} snapshot to {db_type} for window_days {window_days}:", e)
     finally:
         conn.close()
